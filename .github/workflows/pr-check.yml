@@ -55,6 +55,9 @@ jobs:
           - platform: macOS
             runner: macos-26
             os: macos
+          - platform: macOS Intel
+            runner: macos-26-intel
+            os: macos
           - platform: Windows
             runner: windows-2025
             os: windows
@@ -65,7 +68,7 @@ jobs:
       - uses: ./.github/actions/prepare_environment
         with:
           target_os: ${{ matrix.os }}
-          cache_key: check-${{ matrix.os }}
+          cache_key: check-${{ matrix.runner == 'macos-26-intel' && 'macos-intel' || matrix.os }}
           is_self_hosted: false
       - name: Check shipping features
         shell: bash
