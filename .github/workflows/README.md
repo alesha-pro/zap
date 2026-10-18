@@ -16,8 +16,10 @@ gh run list --repo alesha-pro/zap --workflow zap_release.yml
 
 Этот режим создаёт Actions artifacts без создания тега или GitHub Release.
 Все платформы собираются из одного SHA; версия указана в summary запуска.
-После успешной проверки комплект доступен в artifact `release-verified`.
-Artifacts хранятся 7 дней. Пакеты опубликованных Releases хранятся отдельно.
+После успешной проверки пакеты доступны в artifacts `zap-*`, а манифест
+и контрольные суммы — в `release-verification`. Проверочный запуск хранит
+artifacts 7 дней. После успешной загрузки в Release промежуточные artifacts
+удаляются; пакеты Release хранятся отдельно.
 
 ## Выпустить версию
 
@@ -63,8 +65,8 @@ macOS использует ad-hoc подпись без notarization; Windows in
 Apple. GitHub-токен их не заменяет. Эти credentials пока не настроены.
 
 Для текущего workflow дополнительных Secrets, PAT или SSH-ключей не нужно.
-GitHub выдаёт `GITHUB_TOKEN` каждому запуску; `contents: write` получает только
-job публикации. Личный токен `gh` не копируется в репозиторий или Actions.
+GitHub выдаёт `GITHUB_TOKEN` каждому запуску; `contents: write` и `actions: write` получает только
+job публикации (второе право — для удаления промежуточных artifacts своего запуска). Личный токен `gh` не копируется в репозиторий или Actions.
 Стандартные публичные GitHub-hosted runners используются без платных larger
 runners. Подготовка macOS не зависит от Homebrew: protoc 25.1 закреплён
 SHA-256, create-dmg 1.3.0 — SHA коммита. Автообновление приложения и remote-server обращаются к Releases
