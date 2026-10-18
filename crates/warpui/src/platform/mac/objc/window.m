@@ -430,11 +430,20 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
         case NSEventTypeLeftMouseDown: {
             NSButton *windowButton = [self standardWindowButtonAtEvent:event];
             if (windowButton) {
-                _leftMouseDownStartedInNativeWindowChrome = NO;
-                [windowButton mouseDown:event];
+                if (@available(macOS 27, *)) {
+                    // macOS 27 的系统按钮使用手势识别器，需要 AppKit 分发完整的鼠标事件序列。
+                    _leftMouseDownStartedInNativeWindowChrome = YES;
+                    [super sendEvent:event];
+                } else {
+                    _leftMouseDownStartedInNativeWindowChrome = NO;
+                    [windowButton mouseDown:event];
+                }
                 break;
             }
-            _leftMouseDownStartedInNativeWindowChrome = [self eventIsOverResizeEdge:event];
+            _leftMouseDownStartedInNativeWindowChrome = NO;
+            if (@available(macOS 27, *)) {
+                _leftMouseDownStartedInNativeWindowChrome = [self eventIsOverResizeEdge:event];
+            }
             [super sendEvent:event];
             break;
         }
@@ -447,7 +456,7 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
         // This breaks drag-and-drop for panes and tabs (see CLD-2581), so we work around it with
         // custom dispatching.
         case NSEventTypeLeftMouseUp:
-            if (_leftMouseDownStartedInNativeWindowChrome && @available(macOS 27, *)) {
+            if (_leftMouseDownStartedInNativeWindowChrome) {
                 [super sendEvent:event];
             } else {
                 [self.contentView mouseUp:event];
@@ -455,7 +464,7 @@ void init_warp_nswindow(NSWindow<WarpWindowProtocol> *window, bool testMode, boo
             _leftMouseDownStartedInNativeWindowChrome = NO;
             break;
         case NSEventTypeLeftMouseDragged:
-            if (_leftMouseDownStartedInNativeWindowChrome && @available(macOS 27, *)) {
+            if (_leftMouseDownStartedInNativeWindowChrome) {
                 [super sendEvent:event];
             } else {
                 [self.contentView mouseDragged:event];
