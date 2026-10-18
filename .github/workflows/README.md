@@ -1,17 +1,71 @@
-# Release Configurations
+# Сборки и релизы alesha-pro/zap
 
-This README file documents the format of the `release_configurations.json` file located in this directory.  The file defines Zap's various release channels, and provides values for the various variables that are necessary to run the `create_new_releases.yml` GitHub workflow.
+## Проверки изменений
 
-At some point, we may want to replace this document with a JSON schema file (which could be used to validate the correctness of the configuration as part of PR presubmit).
+`CI` запускается на pull request и при обновлении `master`. Он проверяет YAML
+через закреплённый actionlint, проверяет валидатор релизных файлов и выполняет
+`cargo check --locked` с релизными features на Linux, macOS ARM64 и Windows.
+Intel macOS дополнительно проходит полную сборку в `Zap Release`.
+Проверки PR имеют только `contents: read`, включая PR из чужих форков.
 
-## Fields
+## Проверить полную сборку
 
-* **channel**: The channel's unique identifier
-* **type**: The release cadence.  At present, the valid values are "nightly" or "weekly".
-* **is_prerelease**: If true, the GitHub release for this channel will be marked as prerelease.
-* **is_autopush**: If true, this channel uses the "latest" keyword in `channel_versions.json` to automatically deploy new release candidates.  Non-autopush channels require a manual change in order to deploy them.
-* **release_base_name**: The base name of GitHub releases created for this channel.
-* **release_body_text**: The body text for GitHub releases created for this channel.
-* **changelog_slack_channel**: The Slack channel where new changelogs will be posted whenever a new release candidates is cut.
-* **gcs_cache_control_value**: The value of the cache-control response header for release DMGs.
-  - **IMPORTANT!!**: the value of the cache-control header _must_ be all lowercase; uppercase values will not be respected by Cloud CDN.
+```sh
+gh workflow run zap_release.yml --repo alesha-pro/zap --ref master -f mode=build
+gh run list --repo alesha-pro/zap --workflow zap_release.yml
+```
+
+Этот режим создаёт Actions artifacts без создания тега или GitHub Release.
+Все платформы собираются из одного SHA; версия указана в summary запуска.
+После успешной проверки комплект доступен в artifact `release-verified`.
+Artifacts хранятся 7 дней. Пакеты опубликованных Releases хранятся отдельно.
+
+## Выпустить версию
+
+Формат версии: `vYYYY.MM.DD.N`, например `v2026.10.18.1`.
+Последний компонент — возрастающий номер в пределах дня. Он совместим с
+сравнением версий в автообновлении ZAP. Для выпуска используйте новый тег
+на проверенном коммите `master`:
+
+```sh
+git fetch origin
+git tag v2026.10.18.1 origin/master
+git push origin v2026.10.18.1
+```
+
+Push тега запускает сборки. Workflow проверяет принадлежность коммита основной
+ветке, собирает все обязательные пакеты, проверяет комплект и записывает
+`SHA256SUMS` и `BUILD_INFO.json`. Только после этого создаётся черновик Release,
+загружаются файлы и Release становится публичным и `latest`.
+Если загрузка прервалась, черновик остаётся для диагностики; перед повторным
+выпуском удалите неудачный черновик либо выберите новую версию. Готовые Releases
+автоматически не перезаписываются.
+
+Можно получить только черновик, не меняя источник автообновления `latest`:
+
+```sh
+gh workflow run zap_release.yml --repo alesha-pro/zap --ref master \
+  -f mode=draft -f tag=v2026.10.18.1
+```
+
+Имя версии можно опустить: ручной запуск использует дату UTC и номер workflow
+run. Перед публикацией черновика проверьте его пакеты; публикация выполняется
+через GitHub Releases или `gh release edit TAG --draft=false --latest`.
+
+## Пакеты и подписи
+
+Обязательные файлы: macOS ARM64/Intel DMG, Windows x64 installer, Linux x86_64
+AppImage и DEB, три CLI tarball (macOS ARM64/Intel, Linux x86_64).
+RPM и Arch packages собираются дополнительно; их отсутствие не блокирует релиз.
+Linux GUI требует glibc 2.35 или новее; Linux CLI использует static musl.
+
+macOS использует ad-hoc подпись без notarization; Windows installer не подписан.
+Для Apple Developer ID/notarization нужны отдельные сертификат и учётные данные
+Apple. GitHub-токен их не заменяет. Эти credentials пока не настроены.
+
+Для текущего workflow дополнительных Secrets, PAT или SSH-ключей не нужно.
+GitHub выдаёт `GITHUB_TOKEN` каждому запуску; `contents: write` получает только
+job публикации. Личный токен `gh` не копируется в репозиторий или Actions.
+Стандартные публичные GitHub-hosted runners используются без платных larger
+runners. Автообновление приложения и remote-server обращаются к Releases
+`alesha-pro/zap`.

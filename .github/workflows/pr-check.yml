@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workflows:
+    name: Workflow validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install pinned actionlint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/actionlint"
+          gh release download v1.7.12 --repo rhysd/actionlint \
+            --pattern actionlint_1.7.12_linux_amd64.tar.gz \
+            --pattern actionlint_1.7.12_checksums.txt --dir "$RUNNER_TEMP/actionlint"
+          cd "$RUNNER_TEMP/actionlint"
+          sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt
+          tar xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+      - name: Check workflow syntax and release validation
+        run: |
+          "$RUNNER_TEMP/actionlint/actionlint" -color -shellcheck='' -pyflakes=''
+          python3 -m unittest discover -s script/ci -p '*_test.py'
+
+  check:
+    name: Cargo check (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            runner: ubuntu-22.04
+            os: linux
+          - platform: macOS
+            runner: macos-26
+            os: macos
+          - platform: Windows
+            runner: windows-2025
+            os: windows
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/prepare_environment
+        with:
+          target_os: ${{ matrix.os }}
+          cache_key: check-${{ matrix.os }}
+          is_self_hosted: false
+      - name: Check shipping features
+        shell: bash
+        run: cargo check --locked --bin zap-oss --features gui,release_bundle,extern_plist,nld_improvements,autoupdate

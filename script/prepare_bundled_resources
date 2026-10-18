@@ -117,7 +117,7 @@ ADDITIONAL_LICENSES=(
 if [ -z "$NO_LICENSES" ]; then
   LICENSES_OUTPUT="$DEST_DIR/THIRD_PARTY_LICENSES.txt"
   echo "Generating third-party licenses at $LICENSES_OUTPUT"
-  cargo about generate \
+  cargo about generate --locked \
       --workspace \
       --manifest-path "$REPO_ROOT/Cargo.toml" \
       -c "$REPO_ROOT/about.toml" \
@@ -149,7 +149,7 @@ if [ "${SKIP_SETTINGS_SCHEMA:-}" != "1" ]; then
   # so that cargo can reuse compilation artifacts (rather than recompiling
   # any dependencies whose enabled features differ).  Also ensures that
   # feature-gated settings are included in the generated schema.
-  SCHEMA_CMD=(cargo run --manifest-path "$REPO_ROOT/Cargo.toml" -p warp)
+  SCHEMA_CMD=(cargo run --locked --manifest-path "$REPO_ROOT/Cargo.toml" -p warp)
   if [ -n "$CARGO_PROFILE" ]; then
     SCHEMA_CMD+=(--profile "$CARGO_PROFILE")
   fi
