@@ -56,7 +56,9 @@ jobs:
           MODE="${INPUT_MODE:-build}"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            MODE=publish
+            if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+              MODE=publish
+            fi
           else
             TAG="${INPUT_TAG:-v$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}}"
           fi
@@ -553,6 +555,9 @@ jobs:
     needs: [prepare_metadata, verify_artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: zap-release-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -574,6 +579,17 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS)
+          # 构建耗时较长：获得发布锁后重新检查，避免旧版本覆盖 latest。
+          PREVIOUS=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+          if [[ -n "$PREVIOUS" ]]; then
+            python3 - "$PREVIOUS" "$RELEASE_TAG" <<'PYVERSION'
+          import sys
+          previous, current = (tuple(map(int, tag.removeprefix('v').split('.'))) for tag in sys.argv[1:])
+          if current <= previous:
+              raise SystemExit('A newer release was published while this build was running')
+          PYVERSION
+          fi
           gh release create "$RELEASE_TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" \
             --title "ZAP $RELEASE_TAG" --notes-file notes/release-body.md --draft
