@@ -4,8 +4,7 @@
 
 `CI` запускается на pull request и при обновлении `master`. Он проверяет YAML
 через закреплённый actionlint, проверяет валидатор релизных файлов и выполняет
-`cargo check --locked` с релизными features на Linux, macOS ARM64 и Windows.
-Intel macOS дополнительно проходит полную сборку в `Zap Release`.
+`cargo check --locked` с релизными features на Linux, macOS ARM64/Intel и Windows.
 Проверки PR имеют только `contents: read`, включая PR из чужих форков.
 
 ## Проверить полную сборку
@@ -67,5 +66,6 @@ Apple. GitHub-токен их не заменяет. Эти credentials пока
 GitHub выдаёт `GITHUB_TOKEN` каждому запуску; `contents: write` получает только
 job публикации. Личный токен `gh` не копируется в репозиторий или Actions.
 Стандартные публичные GitHub-hosted runners используются без платных larger
-runners. Автообновление приложения и remote-server обращаются к Releases
+runners. Подготовка macOS не зависит от Homebrew: protoc 25.1 закреплён
+SHA-256, create-dmg 1.3.0 — SHA коммита. Автообновление приложения и remote-server обращаются к Releases
 `alesha-pro/zap`.

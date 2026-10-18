@@ -149,21 +149,21 @@ runs:
       shell: bash
       run: corepack enable
 
-    - name: Install protoc for generating rust bindings of protobuf APIs (non-Windows)
-      id: install_protoc
-      if: ${{ inputs.target_os != 'windows' }}
-      # Install protoc for generating rust bindings of protobuf APIs.
-      uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1
-      with:
-        brew: protobuf
-        choco: protoc
-
-    - name: Fail if protoc install did not succeed (non-Windows)
-      if: ${{ inputs.target_os != 'windows' && steps.install_protoc.outcome == 'failure' }}
+    - name: Install pinned protoc from official release (macOS)
+      if: ${{ inputs.target_os == 'macos' }}
       shell: bash
+      # Intel Homebrew 已停止提供新 bottle；使用同一个官方 universal 二进制。
       run: |
-        echo "::error::protoc install step failed on ${{ inputs.target_os }}"
-        exit 1
+        set -euo pipefail
+        PROTOC_DIR="$RUNNER_TEMP/protoc"
+        PROTOC_ZIP="$RUNNER_TEMP/protoc-25.1-osx-universal_binary.zip"
+        curl --fail --location --retry 3 --output "$PROTOC_ZIP" \
+          https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-osx-universal_binary.zip
+        echo "f05a5e7b9bb25464c4f3bf4f4bc9323794e1bd0ff5cb8001bdcb144f8b30fffa  $PROTOC_ZIP" | shasum -a 256 --check
+        unzip -q "$PROTOC_ZIP" -d "$PROTOC_DIR"
+        "$PROTOC_DIR/bin/protoc" --version
+        echo "PROTOC=$PROTOC_DIR/bin/protoc" >> "$GITHUB_ENV"
+        echo "$PROTOC_DIR/bin" >> "$GITHUB_PATH"
 
     - name: Install protoc from official release (Windows)
       if: ${{ inputs.target_os == 'windows' }}

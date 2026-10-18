@@ -199,8 +199,16 @@ jobs:
       - name: Install cargo-bundle
         run: script/install_cargo_bundle
 
-      - name: Install create-dmg
-        run: brew install create-dmg
+      - name: Install pinned create-dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/create-dmg"
+          git -C "$RUNNER_TEMP/create-dmg" remote add origin https://github.com/create-dmg/create-dmg.git
+          git -C "$RUNNER_TEMP/create-dmg" fetch --depth 1 origin a2b71d0fda6d0df2a86dc7f67082d4d73e84c59f
+          git -C "$RUNNER_TEMP/create-dmg" checkout --detach FETCH_HEAD
+          "$RUNNER_TEMP/create-dmg/create-dmg" --version
+          echo "$RUNNER_TEMP/create-dmg" >> "$GITHUB_PATH"
 
       # 用 --selfsign 走 ad-hoc 签名(无 Apple Developer cert 时 fallback 到 `-`):
       # 1. 让 .app 拥有 cdhash → UNUserNotificationCenter 才肯把 Zap 注册到
