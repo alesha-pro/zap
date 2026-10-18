@@ -1,142 +1,149 @@
-# Zap 发布流水线 — 在 openWarp 分支上 push tag (v*) 即触发
-#
-# 与上游 create_release.yml 的差异:
-# - 仅 macOS arm64 + macOS Intel + Windows x64 + Linux x86_64,
-#   Web/CLI/Universal/Win-arm64 全砍
-#   (macOS 双架构分别产单架构 DMG 与 CLI tarball;Linux 产 AppImage/deb/rpm
-#    以及尽力而为的 Arch 包,不发布上游 Zap 仓库源或签名 key)
-# - 单 channel: preview(由 release_configurations.json 提供配置)
-# - 不签名:不传 --read-passwords-from-env(macOS) / 不设 SIGN_TOOL_CMD(Windows)
-# - 不上传 GCS / 第三方 crash 平台 / Slack / changelog,不调 channel-versions repository_dispatch
-# - 复用 ./.github/actions/{prepare_environment,get_channel_config}
-#
-# 流水线结构(先打包后发布,避免出现空 Release):
-#   prepare_metadata → release_{macos,windows,linux} (上传成 workflow artifact)
-#                    → publish_release (全部 build 成功后下载 artifact 并创建 Release)
-# 任意 build job 失败 → publish_release 因 needs 跳过 → 不会留下没有安装包的 Release。
-
+# 所有平台固定到同一 commit；仅发布 job 持有仓库写权限。
 name: Zap Release
 
-# PR 验证由 .github/workflows/pr-check.yml 负责(Linux cargo check)。
-# 本 workflow 只在 push tag / 手动 dispatch 时跑全量三平台打包,避免 PR 跑 ~3h 浪费。
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Build artifacts only, or create a draft release
+        type: choice
+        options: [build, draft]
+        default: build
+      tag:
+        description: Optional version (vYYYY.MM.DD.N); otherwise UTC date and run number
+        type: string
+        default: ""
 
-# 创建 release + 上传 asset 需要写权限。默认 GITHUB_TOKEN 在 fork/受限仓库下是只读,
-# 这里显式声明 contents: write 兜底 403 "Resource not accessible by integration"。
-# actions: write 用于 publish_release 末尾删除本次 run 的 workflow artifact(释放 Actions storage)。
 permissions:
-  contents: write
-  actions: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
-  CONFIG_FILE: ".github/workflows/release_configurations.json"
-  # Zap fork 用 oss channel(对应 app/src/bin/oss.rs 内联 ChannelConfig,
-  # 不依赖 warp-channel-config 私有二进制),preview 等内部 channel 走
-  # channel_config::load_config!() 宏 → build.rs 调 warp-channel-config 失败 →
-  # *_config.json 不生成 → include_str! 编译失败。
   CHANNEL: oss
 
 jobs:
   prepare_metadata:
     name: Prepare metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
-      release_tag: ${{ steps.compute_tag.outputs.tag }}
-      release_branch: ${{ steps.compute_tag.outputs.branch }}
-      release_name: ${{ steps.get-config.outputs.release_base_name }} ${{ steps.compute_tag.outputs.tag }}
+      release_tag: ${{ steps.metadata.outputs.tag }}
+      commit: ${{ steps.metadata.outputs.commit }}
+      mode: ${{ steps.metadata.outputs.mode }}
     steps:
-      # fetch-depth: 0 让 git-cliff 能看到完整 tag/commit 历史;
-      # shallow clone 下 `git describe` 找不到上一个 tag,会退化成空 release notes。
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Get channel configuration
-        id: get-config
-        uses: ./.github/actions/get_channel_config/
-        with:
-          config_file: ${{ env.CONFIG_FILE }}
-          channel: ${{ env.CHANNEL }}
-
-      - name: Compute release tag and branch
-        id: compute_tag
+      - name: Validate version and source commit
+        id: metadata
         shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_MODE: ${{ inputs.mode }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # tag-触发场景:GITHUB_REF=refs/tags/<tag>
-          # workflow_dispatch:GITHUB_REF=refs/heads/<branch>,无 tag,生成临时 tag
+          set -euo pipefail
+          COMMIT=$(git rev-parse HEAD)
+          MODE="${INPUT_MODE:-build}"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-            BRANCH="$TAG"
+            if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+              MODE=publish
+            fi
           else
-            TAG="v0.$(date +%Y.%m.%d.%H%M)"
-            BRANCH="${GITHUB_REF#refs/heads/}"
+            TAG="${INPUT_TAG:-v$(date -u +%Y.%m.%d).${GITHUB_RUN_NUMBER}}"
           fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "Release tag: $TAG / build ref: $BRANCH"
+          if [[ ! "$TAG" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$ ]]; then
+            echo '::error::Use vYYYY.MM.DD.N, for example v2026.10.18.1'
+            exit 1
+          fi
+          python3 - "$TAG" <<'PYDATE'
+          import datetime, sys
+          datetime.datetime.strptime('.'.join(sys.argv[1][1:].split('.')[:3]), '%Y.%m.%d')
+          PYDATE
+          if [[ "$MODE" != build ]]; then
+            git merge-base --is-ancestor "$COMMIT" "origin/$DEFAULT_BRANCH" || {
+              echo '::error::Releases must use a commit from the default branch'
+              exit 1
+            }
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::Release $TAG already exists; choose a new version"
+              exit 1
+            fi
+          fi
+          if git rev-parse --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "$TAG")" = "$COMMIT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          printf 'Version: %s\nCommit: %s\nMode: %s\n' "$TAG" "$COMMIT" "$MODE" >> "$GITHUB_STEP_SUMMARY"
 
-      # 找上一个 release tag(匹配 v*),用于限定 git-cliff 的 commit 范围。
-      # tag-触发:HEAD == 当前 tag,要从 HEAD^ 起找最近的 v* tag。
-      # dispatch:HEAD 不是 tag,直接从 HEAD 起找。
-      # 找不到(首次发布)时输出空字符串,后面 git-cliff 不限定范围。
-      - name: Compute previous release tag
-        id: prev_tag
+      - name: Find previous published release
+        id: previous
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_MODE: ${{ steps.metadata.outputs.mode }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            PREV=$(git describe --tags --abbrev=0 --match='v*' HEAD^ 2>/dev/null || echo "")
-          else
-            PREV=$(git describe --tags --abbrev=0 --match='v*' HEAD 2>/dev/null || echo "")
+          set -euo pipefail
+          PREVIOUS=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+          if [[ -n "$PREVIOUS" ]]; then
+            git rev-parse --verify "refs/tags/$PREVIOUS"
+            if [[ "$RELEASE_MODE" != build ]]; then
+              python3 - "$PREVIOUS" "$RELEASE_TAG" <<'PYVERSION'
+          import sys
+          previous, current = (tuple(map(int, tag.removeprefix('v').split('.'))) for tag in sys.argv[1:])
+          if current <= previous:
+              raise SystemExit('Release version must be newer than the previous published version')
+          PYVERSION
+            fi
+            echo "range=$PREVIOUS..HEAD" >> "$GITHUB_OUTPUT"
           fi
-          echo "prev=$PREV" >> $GITHUB_OUTPUT
-          echo "Previous tag: ${PREV:-<none, first release>}"
 
-      # 用官方推荐的 orhun/git-cliff-action 生成「上个 tag 到 HEAD」的变更说明。
-      # --strip header 去掉模板顶部空 header;--tag 把 unreleased 段标记为本次发布版本。
-      # 范围参数 `<prev>..HEAD` 通过三元表达式注入:有 prev 时限定范围,无 prev 时让
-      # git-cliff 输出全部历史(首次发布场景)。
-      - name: Generate release notes via git-cliff
+      - name: Generate release notes
+        if: steps.previous.outputs.range != ''
         uses: orhun/git-cliff-action@98c93442bb05a455a77bee982867857ae748eeea # v4.5.1
         with:
           config: cliff.toml
-          args: >-
-            --strip header
-            --tag ${{ steps.compute_tag.outputs.tag }}
-            ${{ steps.prev_tag.outputs.prev != '' && format('{0}..HEAD', steps.prev_tag.outputs.prev) || '' }}
+          args: --strip header --tag ${{ steps.metadata.outputs.tag }} ${{ steps.previous.outputs.range }}
         env:
           OUTPUT: release-notes.md
-          GITHUB_REPO: ${{ github.repository }}
 
-      # 把 release_configurations.json 里的一句固定说明拼到 git-cliff 输出之前,
-      # 形成最终的 release body。后续 publish_release 用 body_path 注入到 GitHub Release。
-      - name: Assemble final release body
+      - name: Prepare release description
         shell: bash
         env:
-          RELEASE_BODY_TEXT: ${{ steps.get-config.outputs.release_body_text }}
-          PREV_TAG: ${{ steps.prev_tag.outputs.prev }}
-          THIS_TAG: ${{ steps.compute_tag.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.metadata.outputs.commit }}
         run: |
           {
-            echo "$RELEASE_BODY_TEXT"
+            echo 'ZAP — alesha-pro/zap distribution.'
             echo
-            if [[ -n "$PREV_TAG" ]]; then
-              echo "## 自 \`$PREV_TAG\` 以来的更新"
+            echo 'macOS builds are ad-hoc signed and are not notarized. Windows builds are unsigned.'
+            echo 'Linux GUI packages require glibc 2.35 or newer; the Linux CLI uses static musl.'
+            echo
+            echo "Source commit: $RELEASE_COMMIT"
+            echo "Build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo 'Verify downloads with SHA256SUMS.'
+            echo
+            if [[ -f release-notes.md ]]; then
+              cat release-notes.md
             else
-              echo "## 首发版本变更"
+              echo 'First release from this fork, including the macOS window-button fix.'
             fi
-            echo
-            cat release-notes.md
           } > release-body.md
-          echo "---- release-body.md ----"
-          cat release-body.md
 
-      - name: Upload release body artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-body
           path: release-body.md
@@ -147,7 +154,7 @@ jobs:
     name: Build Release (macOS ${{ matrix.dmg_name_suffix }})
     runs-on: ${{ matrix.runner }}
     needs: prepare_metadata
-    # macos-26 / macos-26-intel(Pro standard)无 sccache,full cargo build + bundle + create-dmg
+    # macos-26 / macos-26-intel无 sccache,full cargo build + bundle + create-dmg
     # 耗时高;Intel 构建历史上超过 180min,这里放宽到 GitHub-hosted job 6h 执行上限。
     timeout-minutes: 360
     strategy:
@@ -156,19 +163,20 @@ jobs:
         include:
           - arch: aarch64
             dmg_name_suffix: arm64
-            runner: macos-26 # Pro standard arm64 (M2 Pro)
+            runner: macos-26
           - arch: x86_64
             dmg_name_suffix: intel
-            runner: macos-26-intel # Pro standard Intel
+            runner: macos-26-intel
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ needs.prepare_metadata.outputs.release_branch }}
+          ref: ${{ needs.prepare_metadata.outputs.commit }}
+          persist-credentials: false
 
       - uses: ./.github/actions/prepare_environment
         with:
           target_os: macos
-          cache_key: macos-${{ matrix.arch }}
+          cache_key: release-macos-${{ matrix.arch }}
           is_self_hosted: false
           install_release_deps: true
 
@@ -246,18 +254,19 @@ jobs:
 
   release_windows:
     name: Build Release (Windows x64)
-    runs-on: windows-latest
+    runs-on: windows-2025
     needs: prepare_metadata
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ needs.prepare_metadata.outputs.release_branch }}
+          ref: ${{ needs.prepare_metadata.outputs.commit }}
+          persist-credentials: false
 
       - uses: ./.github/actions/prepare_environment
         with:
           target_os: windows
-          cache_key: x64
+          cache_key: release-windows-x64
           is_self_hosted: false
           install_release_deps: true
 
@@ -294,7 +303,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ needs.prepare_metadata.outputs.release_branch }}
+          ref: ${{ needs.prepare_metadata.outputs.commit }}
+          persist-credentials: false
 
       # GitHub-hosted ubuntu runner 的 / 余量有限,而本 job 先后在同一磁盘产出
       # release-lto(GUI/AppImage/deb/rpm/arch)与 release-cli(musl CLI)两份完整
@@ -311,6 +321,7 @@ jobs:
       - uses: ./.github/actions/prepare_environment
         with:
           target_os: linux
+          cache_key: release-linux-x86_64
           is_self_hosted: false
           install_release_deps: true
 
@@ -511,60 +522,78 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish_release:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    # 必须等所有平台都 build 成功才发布;任一失败 → 此 job 跳过 → 不会出现空 Release。
-    needs:
-      - prepare_metadata
-      - release_macos
-      - release_windows
-      - release_linux
+  verify_artifacts:
+    name: Verify release assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [prepare_metadata, release_macos, release_windows, release_linux]
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ needs.prepare_metadata.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: zap-*
           path: dist
           merge-multiple: true
-
-      # release-body artifact 是给 GitHub Release 描述用的,不是要挂到 Release 资产列表的产物。
-      # 提前从 dist/ 移到独立路径,避免 `files: dist/*` 把它当成 asset 上传。
-      - name: Extract release body from artifacts
-        shell: bash
-        run: |
-          mv dist/release-body.md ./release-body.md
-          echo "---- release-body.md ----"
-          cat ./release-body.md
-
-      - name: List downloaded files
-        run: ls -lh dist
-        shell: bash
-
-      - name: Create GitHub release with all assets
-        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
-        with:
-          name: ${{ needs.prepare_metadata.outputs.release_name }}
-          tag_name: ${{ needs.prepare_metadata.outputs.release_tag }}
-          body_path: ./release-body.md
-          draft: false
-          prerelease: false
-          make_latest: "true"
-          files: dist/*
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      # 发布成功后立刻删本次 run 的 workflow artifact,释放 Actions storage 配额。
-      # 安装包已经挂到 GitHub Release(独立存储,不占 Actions storage),
-      # workflow artifact 只是 build job → publish job 的中间传递管道,留着没用。
-      # 仅在 Release 创建成功后执行(if: success()),失败保留 artifact 方便复盘。
-      - name: Delete workflow artifacts to free Actions storage
-        if: success()
+      - name: Validate asset set and generate checksums
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.prepare_metadata.outputs.commit }}
+        run: python3 script/ci/verify_release_assets.py dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-verified
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish_release:
+    name: Publish GitHub Release
+    if: needs.prepare_metadata.outputs.mode != 'build'
+    needs: [prepare_metadata, verify_artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: zap-release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-verified
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-body
+          path: notes
+      - name: Create release after verifying every asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare_metadata.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ needs.prepare_metadata.outputs.commit }}
+          RELEASE_MODE: ${{ needs.prepare_metadata.outputs.mode }}
         run: |
           set -euo pipefail
-          ids=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --jq '.artifacts[].id')
-          for id in $ids; do
-            echo "Deleting artifact $id"
-            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
-          done
-        shell: bash
+          (cd dist && sha256sum --check SHA256SUMS)
+          # 构建耗时较长：获得发布锁后重新检查，避免旧版本覆盖 latest。
+          PREVIOUS=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+          if [[ -n "$PREVIOUS" ]]; then
+            python3 - "$PREVIOUS" "$RELEASE_TAG" <<'PYVERSION'
+          import sys
+          previous, current = (tuple(map(int, tag.removeprefix('v').split('.'))) for tag in sys.argv[1:])
+          if current <= previous:
+              raise SystemExit('A newer release was published while this build was running')
+          PYVERSION
+          fi
+          gh release create "$RELEASE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" \
+            --title "ZAP $RELEASE_TAG" --notes-file notes/release-body.md --draft
+          if [[ "$RELEASE_MODE" == publish ]]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
+          echo "Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"

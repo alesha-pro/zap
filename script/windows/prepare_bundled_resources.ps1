@@ -160,7 +160,7 @@ $AdditionalLicenses += @(
 
 $LicensesOutput = Join-Path $DestinationDir 'THIRD_PARTY_LICENSES.txt'
 Write-Output "Generating third-party licenses at $LicensesOutput"
-cargo about generate --workspace --manifest-path "$RepoRoot\Cargo.toml" -c "$RepoRoot\about.toml" -o "$LicensesOutput" "$RepoRoot\about.hbs"
+cargo about generate --locked --workspace --manifest-path "$RepoRoot\Cargo.toml" -c "$RepoRoot\about.toml" -o "$LicensesOutput" "$RepoRoot\about.hbs"
 if (-Not $?) {
     Write-Error 'Failed to generate third-party licenses'
     exit 1
@@ -190,7 +190,7 @@ if ($env:SKIP_SETTINGS_SCHEMA -ne '1') {
     # recompiling any dependencies whose enabled features differ).  Also
     # ensures that feature-gated settings are included in the generated
     # schema.
-    $SchemaCmd = @('run', '--manifest-path', (Join-Path $RepoRoot 'Cargo.toml'), '-p', 'warp')
+    $SchemaCmd = @('run', '--locked', '--manifest-path', (Join-Path $RepoRoot 'Cargo.toml'), '-p', 'warp')
     if ($CargoProfile) {
         $SchemaCmd += @('--profile', $CargoProfile)
     }
